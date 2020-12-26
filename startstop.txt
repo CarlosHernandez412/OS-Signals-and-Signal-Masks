@@ -1,0 +1,156 @@
+startstop.c
+
+readme file 
+
+  The goal of this code is to more carefully understand signal handlers. Refer 
+  to these manpages for details on the concepts covered in this section.
+
+           $ man 7 signal
+           $ man 2 sigprocmask
+           $ man 2 sigsuspend
+
+  Study the code and make sure you understand how the signal handlers
+  (user1_handler(), etc.) are written, how the signal masks (intrmask, etc.)
+  are constructed with sigemptymask() and sigaddset, and how sigprocmask()
+  and sigsuspend() work together to protect a critical section of code. This
+  program uses POSIX-style signal handling using USR1 and USR2, which are 
+  the user-defined signals.
+
+  Compile and execute. From another terminal screen send SIGUSR1 and SIGUSR2:
+
+              $ kill -USR1 [pid]    # suspend the process
+              $ kill -USR2 [pid]    # restart the process
+              $ kill -INT [pid]     # kill the process (or hit Ctrl-c)
+
+  Now look closely at the code. Confirm that what you see on the screen 
+  is occurring in the code. When you understand the code, answer these 
+  questions.
+
+  CONSIDER.
+
+  1. Assume a USR1 signal is delivered to startstop. While in sigsuspend() 
+     a USR2 signal arrives and is handled. How many call frames are on the 
+     runtime stack while the USR2 handler is executing? 
+
+  2. Just before returning to its calling function sigsuspend(2) restores the 
+     program to its mask before sigsuspend; see sigsuspend(2) for details. 
+     What would happen if sigsuspend did not restore the mask before returning
+     and left that to its calling function?
+
+  3. Assume you do the following:
+
+    ./startstop
+    My PID is: 21588
+    Send SIGUSR1 to pause, SIGUSR2 to cont or Ctrl-C to stop
+    ..............................
+
+    From another terminal you send signals as follows 
+
+              $ kill -USR1 21588; kill -USR2 21588 
+
+    The output from the startstop screen is:
+
+    (usr2handler) oops! process already unpaused.
+    (usr1handler) pausing
+
+    What happened?
+
+ 4. Assume you are generating closely spaced signals from the command line.
+    Is it ever possible for two instances of usr1handler to be on the stack 
+    at the same time? 
+
+  1. Assume a USR1 signal is delivered to startstop. While in sigsuspend() 
+     a USR2 signal arrives. How many call frames are on the stack? 
+
+     ANS: FOUR.
+     The usr1_handler blocks USR2 signals until it calls sigsuspend. The USR2
+     signal is placed in the pending queue until that time. When the USR2
+     signal is unblocked by sigsuspend, the usr2_handler frame is pushed onto 
+     the stack. The stack looks like this:
+
+            usr2_handler()
+            --------------
+            sigsuspend()
+            --------------
+            usr1_handler()
+            --------------
+            main()
+            -------------
+
+  2. Just before returning to its calling function sigsuspend(2) restores the 
+     program to its mask before sigsuspend; see sigsuspend(2) for details.
+     What does restoring the mask do? 
+
+     ANS:
+     The usr1_handler blocks usr1, usr2 and int signals. If this mask is not 
+     restored by sigsuspend, there is a brief moment in time when one of 
+     those signals could be delivered and be handled as soon as sigsuspend 
+     returns but before usr1_handler() has a chance to retore the mask. This
+     means you have lost control. The goal is to control asynchronous signals
+     completely. You need to plug up all the holes.
+  
+  3. Assume you do the following:
+
+    ./startstop
+    My PID is: 21588
+    Send SIGUSR1 to pause, SIGUSR2 to cont or Ctrl-C to stop
+    ..............................
+
+    From another terminal you send signals as follows 
+
+              $ kill -USR1 21588; kill -USR2 21588 
+
+    The output from the startstop screen is:
+
+    (usr2handler) oops! process already unpaused.
+    (usr1handler) pausing
+
+    What happened?
+
+   ANS:
+   Two closely spaced signals are NOT guaranteed to be delivered in order by 
+   the operating system. This is a RACE CONDITION. SIGUSR2 was actually 
+   delivered before SIGUSR1.
+
+   4. Assume you are generating closely spaced signals from the command line.
+      Is it ever possible for two instances of usr1handler() to be on the 
+      stack at the same time?
+
+     ANS:
+     The screen display does not always reflect the actual order in which 
+     things occur. You have to analyze the code.
+
+     While usr1handler() is executing, there are TWO places that a USR1 signal 
+     could interrupt execution. One place is during sigsuspend(). USR1 & USR2 
+     signals that come in during sigsuspend are not blocked. Thus, for a brief
+     moment there will be two call frames for the  usr1handler. There is a 
+     second place that a USR1 signal could preempt execution of the usr1handler
+     and that is right before the return:
+
+           sigprocmask(SIG_SETMASK, &savedmask, NULL); 
+           << a USR2 or a USR1 signal could come in here >>
+           return;
+
+     Assume a USR1 signal comes in while paused == 0. Then a second frame
+     for usr1handler() will be pushed onto the stack. Then sigsuspend will
+     be called. And so on. So the stack would look like this:
+
+
+                  usr2handler                   sigsuspend 
+    sigsuspend    sigsuspend     usr1handler    usr1handler    REPEAT
+    usr1handler   usr1handler    usr1handler    usr1handler
+    main          main           main           main
+    ===========   ===========    ============   ===========
+    SIGUSR1       SIGUSR2        SIGUSR1      
+    paused=1      paused=0
+
+    So YES it is possible to have two usr1handler frames on the stack!
+
+    HOW TO CLOSE UP THESE SMALL WINDOWS WHERE A SIGNAL CAN SNEAK THROUGH?
+
+    Setting the mask in the sigaction structure for the handler. POSIX standard
+    ensures that setting the mask and calling the handler is ATOMIC. This will 
+    100% prevent any problems that result from the race conditions of 
+    asynchronous signals.
+
+
